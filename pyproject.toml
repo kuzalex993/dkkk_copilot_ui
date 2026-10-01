@@ -1,0 +1,21 @@
+[project]
+name = "dkkk-copilot-ui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Aleksei Kuzmin", email = "kuzalex993@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+    "streamlit>=1.64.0",
+]
+
+[project.scripts]
+dkkk-copilot-ui = "dkkk_copilot_ui:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
