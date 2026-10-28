@@ -6,7 +6,12 @@ import uuid
 
 import streamlit as st
 
-from dkkk_copilot_ui.backend_client import BackendError, invoke_agent, upload_file
+from dkkk_copilot_ui.backend_client import (
+    BackendError,
+    StreamEvent,
+    stream_agent,
+    upload_file,
+)
 from dkkk_copilot_ui.config import get_settings
 
 st.set_page_config(page_title="Copilot Chat", page_icon="💬", layout="centered")
@@ -73,17 +78,66 @@ st.title("💬 Copilot Chat")
 
 st.subheader("2. Чат с агентом")
 
+PLAN_ICONS = {
+    "pending": "⏳",
+    "in_progress": "🔄",
+    "completed": "✅",
+    "skipped": "⏭️",
+    "blocked": "⛔",
+}
+TOOL_ICONS = {"ok": "✅", "retry": "🔁", "failed": "❌"}
+OUTCOME_NOTES = {
+    "partial": "Ответ неполный.",
+    "clarify": "Агенту нужно уточнение.",
+    "refusal": "Агент отказался отвечать.",
+}
+
+
+def format_plan(steps: list[dict]) -> str:
+    lines = []
+    for step in steps:
+        icon = PLAN_ICONS.get(step.get("status", ""), "•")
+        line = f"{icon} {step.get('n', '')}. {step.get('title', '')}"
+        if step.get("reason"):
+            line += f" — _{step['reason']}_"
+        lines.append(line)
+    return "\n\n".join(lines)
+
+
+def describe_event(event: StreamEvent) -> str | None:
+    """One progress line for the log, or None for events shown elsewhere."""
+    data = event.data
+    if event.type == "phase":
+        return f"**{data.get('text', data.get('phase', ''))}**"
+    if event.type == "tool.started":
+        return f"▶️ {data.get('label', '')}"
+    if event.type == "tool.finished":
+        icon = TOOL_ICONS.get(data.get("outcome", ""), "•")
+        line = f"{icon} {data.get('label', '')} ({data.get('elapsed_s', 0):.1f} с)"
+        detail = data.get("summary") or data.get("text")
+        return f"{line} — {detail}" if detail else line
+    if event.type == "summary":
+        return f"📋 {data.get('text', '')}"
+    return None
+
+
+def render_progress(progress: list[str], plan: str | None) -> None:
+    if plan:
+        st.markdown("**План**")
+        st.markdown(plan)
+    for line in progress:
+        st.markdown(line)
+
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message.get("excel_bytes"):
-            st.download_button(
-                "Скачать Excel-файл ответа",
-                data=message["excel_bytes"],
-                file_name=message.get("excel_filename") or "response.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"download-{id(message)}",
-            )
+        if message.get("progress") or message.get("plan"):
+            with st.expander("Ход выполнения"):
+                render_progress(message.get("progress", []), message.get("plan"))
+        if message.get("error"):
+            st.error(message["content"])
+        else:
+            st.markdown(message["content"])
 
 prompt = st.chat_input("Задайте вопрос по загруженному файлу...")
 if prompt:
@@ -91,37 +145,64 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    with st.chat_message("assistant"), st.spinner("Агент думает..."):
+    with st.chat_message("assistant"):
+        progress: list[str] = []
+        plan: str | None = None
+        reply: str | None = None
+        is_error = False
+
+        status = st.status("Агент думает...", expanded=True)
+        with status:
+            plan_box = st.empty()
+            log_box = st.container()
         try:
-            invoke_result = invoke_agent(
+            for event in stream_agent(
                 settings,
                 message=prompt,
                 client_id=settings.client_id,
                 session_id=st.session_state.session_id,
                 user_id=st.session_state.user_id,
-            )
+            ):
+                if event.type == "plan":
+                    plan = format_plan(event.data.get("steps", []))
+                    with plan_box.container():
+                        st.markdown("**План**")
+                        st.markdown(plan)
+                elif event.type == "answer":
+                    reply = event.data.get("text", "")
+                    note = OUTCOME_NOTES.get(event.data.get("outcome", ""))
+                    status.update(
+                        label=note or "Готово", state="complete", expanded=False
+                    )
+                elif event.type == "error":
+                    reply = f"Ошибка агента: {event.data.get('text', '')}"
+                    is_error = True
+                    status.update(label="Ошибка", state="error", expanded=False)
+                else:
+                    line = describe_event(event)
+                    if line:
+                        progress.append(line)
+                        log_box.markdown(line)
+                        if event.type == "phase":
+                            status.update(label=event.data.get("text", "Агент думает..."))
         except BackendError as exc:
             reply = f"Ошибка агента ({exc.status_code}): {exc.message}"
-            st.error(reply)
-            st.session_state.messages.append({"role": "assistant", "content": reply})
+            is_error = True
         except Exception as exc:  # noqa: BLE001
             reply = f"Не удалось связаться с бэкендом: {exc}"
+            is_error = True
+
+        if is_error:
+            status.update(label="Ошибка", state="error", expanded=False)
             st.error(reply)
-            st.session_state.messages.append({"role": "assistant", "content": reply})
         else:
-            st.markdown(invoke_result.text)
-            assistant_message: dict[str, str | bytes | None] = {
+            st.markdown(reply or "Агент вернул пустой ответ.")
+        st.session_state.messages.append(
+            {
                 "role": "assistant",
-                "content": invoke_result.text,
+                "content": reply or "Агент вернул пустой ответ.",
+                "progress": progress,
+                "plan": plan,
+                "error": is_error,
             }
-            if invoke_result.excel_bytes:
-                assistant_message["excel_bytes"] = invoke_result.excel_bytes
-                assistant_message["excel_filename"] = invoke_result.excel_filename
-                st.download_button(
-                    "Скачать Excel-файл ответа",
-                    data=invoke_result.excel_bytes,
-                    file_name=invoke_result.excel_filename or "response.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download-{len(st.session_state.messages)}",
-                )
-            st.session_state.messages.append(assistant_message)
+        )

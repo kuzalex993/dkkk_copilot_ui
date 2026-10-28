@@ -20,7 +20,7 @@ def _env(name: str, default: str) -> str:
 class Settings:
     host: str
     upload_path: str
-    invoke_path: str
+    stream_path: str
     client_id: str
     request_timeout: float
 
@@ -29,15 +29,15 @@ class Settings:
         return urljoin(self.host.rstrip("/") + "/", self.upload_path.lstrip("/"))
 
     @property
-    def invoke_url(self) -> str:
-        return urljoin(self.host.rstrip("/") + "/", self.invoke_path.lstrip("/"))
+    def stream_url(self) -> str:
+        return urljoin(self.host.rstrip("/") + "/", self.stream_path.lstrip("/"))
 
 
 def get_settings() -> Settings:
     return Settings(
         host=_env("BACKEND_HOST", "http://localhost:8080"),
         upload_path=_env("BACKEND_UPLOAD_PATH", "/api/v1/upload"),
-        invoke_path=_env("BACKEND_INVOKE_PATH", "/api/v1/invoke-agent"),
+        stream_path=_env("BACKEND_STREAM_PATH", "/api/v1/invoke-agent/stream"),
         client_id=_env("BACKEND_CLIENT_ID", "CI00000000"),
         request_timeout=float(_env("BACKEND_REQUEST_TIMEOUT", "60")),
     )

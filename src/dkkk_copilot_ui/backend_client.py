@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import io
+import json
 import uuid
-import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import requests
 
@@ -29,11 +30,13 @@ class UploadResult:
     save_dir: str
 
 
+TERMINAL_EVENTS = frozenset({"answer", "error"})
+
+
 @dataclass
-class InvokeResult:
-    text: str
-    excel_filename: str | None = None
-    excel_bytes: bytes | None = None
+class StreamEvent:
+    type: str
+    data: dict[str, Any]
 
 
 def _request_time() -> str:
@@ -97,55 +100,53 @@ def upload_file(
     )
 
 
-def invoke_agent(
+def stream_agent(
     settings: Settings,
     message: str,
     client_id: str,
     session_id: str,
     user_id: str,
-) -> InvokeResult:
+) -> Iterator[StreamEvent]:
+    """POST to the SSE endpoint and yield events until the terminal `answer` / `error`."""
     headers = _common_headers(client_id, session_id, user_id)
     headers["Content-Type"] = "application/json"
-    response = requests.post(
-        settings.invoke_url,
+    headers["Accept"] = "text/event-stream"
+    with requests.post(
+        settings.stream_url,
         headers=headers,
         json={"message": message},
+        stream=True,
+        # Read timeout applies between chunks; the backend pings every ~15 s.
         timeout=settings.request_timeout,
-    )
-    _raise_for_error(response)
+    ) as response:
+        _raise_for_error(response)
+        response.encoding = "utf-8"
+        event_type = "message"
+        data_lines: list[str] = []
+        for line in response.iter_lines(decode_unicode=True):
+            if line is None:
+                continue
+            if line == "":
+                if data_lines:
+                    event = _make_event(event_type, "\n".join(data_lines))
+                    yield event
+                    if event.type in TERMINAL_EVENTS:
+                        return
+                event_type, data_lines = "message", []
+            elif line.startswith(":"):
+                continue  # heartbeat `: ping`
+            elif line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+    raise BackendError(0, "Поток оборвался без финального ответа.")
 
-    content_type = response.headers.get("content-type", "")
 
-    if "zip" in content_type or "octet-stream" in content_type:
-        return _parse_zip_response(response.content)
-
+def _make_event(event_type: str, raw: str) -> StreamEvent:
     try:
-        payload = response.json()
+        data = json.loads(raw)
     except ValueError:
-        return InvokeResult(text=response.text)
-
-    if isinstance(payload, dict) and "message" in payload:
-        return InvokeResult(text=str(payload["message"]))
-    return InvokeResult(text=str(payload))
-
-
-def _parse_zip_response(content: bytes) -> InvokeResult:
-    text_answer = ""
-    excel_filename: str | None = None
-    excel_bytes: bytes | None = None
-
-    with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        for name in archive.namelist():
-            lower = name.lower()
-            data = archive.read(name)
-            if lower.endswith((".xlsx", ".xlsm", ".xls")):
-                excel_filename = name
-                excel_bytes = data
-            elif lower.endswith((".txt", ".md", ".json")):
-                text_answer = data.decode("utf-8", errors="replace")
-
-    return InvokeResult(
-        text=text_answer or "Агент вернул ответ без текстового содержимого.",
-        excel_filename=excel_filename,
-        excel_bytes=excel_bytes,
-    )
+        data = {"text": raw}
+    if not isinstance(data, dict):
+        data = {"text": str(data)}
+    return StreamEvent(type=event_type, data=data)
