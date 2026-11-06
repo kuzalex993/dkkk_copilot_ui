@@ -24,7 +24,7 @@ All backend connection settings are read from `.env` (see `.env.example`):
 | --- | --- | --- |
 | `BACKEND_HOST` | `http://localhost:8080` | Base URL of the backend service |
 | `BACKEND_UPLOAD_PATH` | `/api/v1/upload` | Excel upload endpoint |
-| `BACKEND_STREAM_PATH` | `/api/v1/invoke-agent/stream` | SSE chat/agent endpoint |
+| `BACKEND_STREAM_PATH` | `/api/v1/invoke-agent/stream` | Agent endpoint: SSE, or `/api/v1/invoke-agent` for non-streaming ZIP responses |
 | `BACKEND_CLIENT_ID` | `CI00000000` | Value sent as `x-client-id` |
 | `BACKEND_REQUEST_TIMEOUT` | `60` | Request timeout (seconds) |
 
@@ -42,8 +42,10 @@ including `outcome: "clarify"`, completes the turn; an `error` displays its text
 Assistant history retains answer outcomes and error kinds. Connection failures
 keep the pending clarification available to retry.
 
-The non-streaming ZIP endpoint has no structured clarification options and is
-not used for this flow.
+For non-streaming mode, set `BACKEND_STREAM_PATH=/api/v1/invoke-agent`.
+The client detects `application/zip`, reads the UTF-8 answer from
+`txt_response.txt`, and displays it as the completed assistant response.
+This endpoint has no structured clarification options or progress events.
 
 ## Tests
 

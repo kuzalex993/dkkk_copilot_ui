@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import uuid
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import Any
 
 import requests
@@ -107,10 +109,10 @@ def stream_agent(
     session_id: str,
     user_id: str,
 ) -> Iterator[StreamEvent]:
-    """POST to the SSE endpoint and yield events until a terminal clarification, answer, or error."""
+    """Yield SSE events or a final answer from the non-streaming ZIP endpoint."""
     headers = _common_headers(client_id, session_id, user_id)
     headers["Content-Type"] = "application/json"
-    headers["Accept"] = "text/event-stream"
+    headers["Accept"] = "text/event-stream, application/zip"
     with requests.post(
         settings.stream_url,
         headers=headers,
@@ -120,6 +122,23 @@ def stream_agent(
         timeout=settings.request_timeout,
     ) as response:
         _raise_for_error(response)
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type == "application/zip":
+            try:
+                with zipfile.ZipFile(BytesIO(response.content)) as archive:
+                    text = archive.read("txt_response.txt").decode("utf-8-sig")
+            except (zipfile.BadZipFile, KeyError, UnicodeError) as exc:
+                raise BackendError(
+                    response.status_code,
+                    "Некорректный ZIP-ответ агента: не удалось прочитать txt_response.txt.",
+                ) from exc
+            yield StreamEvent("answer", {"text": text})
+            return
+        if content_type != "text/event-stream":
+            raise BackendError(
+                response.status_code,
+                f"Неожиданный формат ответа агента: {content_type or 'Content-Type отсутствует'}.",
+            )
         response.encoding = "utf-8"
         event_type = "message"
         data_lines: list[str] = []

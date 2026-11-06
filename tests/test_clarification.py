@@ -1,11 +1,13 @@
 import json
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from streamlit.testing.v1 import AppTest
 
-from dkkk_copilot_ui.backend_client import StreamEvent, stream_agent
+from dkkk_copilot_ui.backend_client import BackendError, StreamEvent, stream_agent
 from dkkk_copilot_ui.config import get_settings
 
 APP = Path(__file__).resolve().parents[1] / "src/dkkk_copilot_ui/app.py"
@@ -23,6 +25,7 @@ class ClarificationTests(unittest.TestCase):
     def test_sse_event_name_and_continuation_headers(self):
         response = MagicMock()
         response.ok = True
+        response.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
         response.iter_lines.return_value = iter([
             ": ping", "event: clarification",
             "data: " + json.dumps(QUESTION), "",
@@ -43,6 +46,51 @@ class ClarificationTests(unittest.TestCase):
             self.assertEqual(headers["x-client-id"], "client")
             self.assertIn("x-trace-id", headers)
             self.assertIn("x-request-time", headers)
+
+    def test_non_streaming_zip_answer_in_chat(self):
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("txt_response.txt", "Привет! Чем могу помочь?")
+            archive.writestr("generated/agent_output.xlsx", b"unused")
+        response = MagicMock()
+        response.ok = True
+        response.headers = {"Content-Type": "application/zip"}
+        response.content = buffer.getvalue()
+        response.__enter__.return_value = response
+        with patch("dkkk_copilot_ui.backend_client.requests.post", return_value=response):
+            app = AppTest.from_file(str(APP)).run()
+            app.chat_input[0].set_value("Привет!").run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        self.assertEqual(app.session_state.messages[-1]["content"], "Привет! Чем могу помочь?")
+        self.assertEqual(app.session_state.messages[-1]["event"], "answer")
+        response.iter_lines.assert_not_called()
+
+    def test_invalid_zip_response(self):
+        response = MagicMock()
+        response.ok = True
+        response.status_code = 200
+        response.headers = {"Content-Type": "application/zip"}
+        response.__enter__.return_value = response
+        empty_zip = BytesIO()
+        with zipfile.ZipFile(empty_zip, "w"):
+            pass
+        for content in (b"broken zip", empty_zip.getvalue()):
+            with self.subTest(content=content):
+                response.content = content
+                with patch("dkkk_copilot_ui.backend_client.requests.post", return_value=response):
+                    with self.assertRaisesRegex(BackendError, "txt_response.txt"):
+                        list(stream_agent(get_settings(), "Привет!", "client", "session", "user"))
+
+    def test_unexpected_response_format(self):
+        response = MagicMock()
+        response.ok = True
+        response.status_code = 200
+        response.headers = {"Content-Type": "text/html"}
+        response.__enter__.return_value = response
+        with patch("dkkk_copilot_ui.backend_client.requests.post", return_value=response):
+            with self.assertRaisesRegex(BackendError, "text/html"):
+                list(stream_agent(get_settings(), "Привет!", "client", "session", "user"))
 
     def test_repeated_pauses_messages_and_final_clarify_answer(self):
         with patch("dkkk_copilot_ui.backend_client.stream_agent") as stream:
