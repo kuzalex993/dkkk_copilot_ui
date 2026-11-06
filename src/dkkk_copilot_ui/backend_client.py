@@ -30,7 +30,7 @@ class UploadResult:
     save_dir: str
 
 
-TERMINAL_EVENTS = frozenset({"answer", "error"})
+TERMINAL_EVENTS = frozenset({"clarification", "answer", "error"})
 
 
 @dataclass
@@ -107,7 +107,7 @@ def stream_agent(
     session_id: str,
     user_id: str,
 ) -> Iterator[StreamEvent]:
-    """POST to the SSE endpoint and yield events until the terminal `answer` / `error`."""
+    """POST to the SSE endpoint and yield events until a terminal clarification, answer, or error."""
     headers = _common_headers(client_id, session_id, user_id)
     headers["Content-Type"] = "application/json"
     headers["Accept"] = "text/event-stream"

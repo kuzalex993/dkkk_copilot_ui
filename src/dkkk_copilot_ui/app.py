@@ -27,16 +27,20 @@ if "messages" not in st.session_state:
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
 
+st.session_state.setdefault("pending_clarification", None)
+pending = st.session_state.pending_clarification
+
 with st.sidebar:
     st.header("1. Загрузите Excel-файл")
     uploaded_file = st.file_uploader(
         "Excel файл для анализа",
         type=["xlsx", "xlsm", "xls"],
         accept_multiple_files=False,
+        disabled=pending is not None,
     )
 
     if uploaded_file is not None and st.button(
-        "Отправить файл на сервер", type="primary"
+        "Отправить файл на сервер", type="primary", disabled=pending is not None
     ):
         with st.spinner("Загрузка файла..."):
             try:
@@ -65,11 +69,15 @@ with st.sidebar:
         "User ID",
         value=st.session_state.user_id,
         max_chars=8,
+        disabled=pending is not None,
         help="Используется бэкендом как пространство имён для загруженного файла и истории диалога.",
     )
     st.caption(f"Session ID: `{st.session_state.session_id}`")
 
-    if st.button("Новый диалог"):
+    if pending:
+        st.caption("Ответьте на уточнение, прежде чем менять файл или пользователя.")
+
+    if st.button("Новый диалог", disabled=pending is not None):
         st.session_state.messages = []
         st.session_state.uploaded_filename = None
         st.rerun()
@@ -139,7 +147,10 @@ for message in st.session_state.messages:
         else:
             st.markdown(message["content"])
 
-prompt = st.chat_input("Задайте вопрос по загруженному файлу...")
+prompt = st.chat_input(
+    "Ответьте на уточнение..." if pending else "Задайте вопрос по загруженному файлу...",
+    submit_mode="disable",
+)
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -150,6 +161,13 @@ if prompt:
         plan: str | None = None
         reply: str | None = None
         is_error = False
+        terminal_type = None
+        terminal_data: dict = {}
+        context = pending["context"] if pending else {
+            "client_id": settings.client_id,
+            "session_id": st.session_state.session_id,
+            "user_id": st.session_state.user_id,
+        }
 
         status = st.status("Агент думает...", expanded=True)
         with status:
@@ -159,15 +177,21 @@ if prompt:
             for event in stream_agent(
                 settings,
                 message=prompt,
-                client_id=settings.client_id,
-                session_id=st.session_state.session_id,
-                user_id=st.session_state.user_id,
+                **context,
             ):
+                if event.type in {"clarification", "answer", "error"}:
+                    terminal_type = event.type
+                    terminal_data = event.data
                 if event.type == "plan":
                     plan = format_plan(event.data.get("steps", []))
                     with plan_box.container():
                         st.markdown("**План**")
                         st.markdown(plan)
+                elif event.type == "clarification":
+                    reply = event.data.get("text", "")
+                    status.update(
+                        label="Ожидается уточнение", state="complete", expanded=False
+                    )
                 elif event.type == "answer":
                     reply = event.data.get("text", "")
                     note = OUTCOME_NOTES.get(event.data.get("outcome", ""))
@@ -206,3 +230,16 @@ if prompt:
                 "error": is_error,
             }
         )
+
+        if terminal_type == "clarification":
+            st.session_state.pending_clarification = {
+                "context": context,
+            }
+        elif terminal_type in {"answer", "error"}:
+            st.session_state.pending_clarification = None
+        st.session_state.messages[-1].update(
+            event=terminal_type,
+            outcome=terminal_data.get("outcome"),
+            kind=terminal_data.get("kind"),
+        )
+        st.rerun()
